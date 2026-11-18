@@ -1,6 +1,6 @@
 # FocusQuest RPG ⚔️🧠
 
-[![Netlify Status](https://api.netlify.com/api/v1/badges/d60ca84f-1c6f-4fd1-9599-4536ba7d4fde/deploy-status)](https://app.netlify.com/projects/focusquest-rpg-tdah/deploys)
+[![Netlify Status](https://api.netlify.com/api/v1/badges/d60ca84f-1c6f-4fd1-9599-4536ba7d4fde/deploy-status?branch=main)](https://app.netlify.com/projects/focusquest-rpg-tdah/deploys)
 
 **Live Demo:** [https://focusquest-rpg-tdah.netlify.app](https://focusquest-rpg-tdah.netlify.app)
 
