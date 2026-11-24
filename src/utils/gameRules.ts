@@ -193,33 +193,51 @@ export function createInitialSeedState(): AppState {
   };
 }
 
-export function loadAppState(): AppState {
+export function normalizeAppState(parsed: AppState): AppState {
+  const now = Date.now();
+  const normalized: AppState = {
+    ...parsed,
+    player: {
+      ...parsed.player,
+      xpToNextLevel:
+        parsed.player.xpToNextLevel || calculateXpToNextLevel(parsed.player.level || 1),
+    },
+  };
+  // Silent combo expiration check on load (Zero punishment)
+  if (
+    normalized.player.lastActionTimestamp &&
+    now - normalized.player.lastActionTimestamp > COMBO_TIMEOUT_MS
+  ) {
+    normalized.player.comboCount = 0;
+    normalized.player.comboMultiplier = 1.0;
+  }
+  return normalized;
+}
+
+/**
+ * Read-only check for legacy data stored in localStorage before the cloud database migration.
+ */
+export function readLegacyLocalState(): AppState | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return createInitialSeedState();
+    if (!raw) return null;
     const parsed = JSON.parse(raw) as AppState;
     if (!parsed || !parsed.player || !Array.isArray(parsed.quests)) {
-      return createInitialSeedState();
+      return null;
     }
-    // Silent combo expiration check on load (Zero punishment)
-    const now = Date.now();
-    if (
-      parsed.player.lastActionTimestamp &&
-      now - parsed.player.lastActionTimestamp > COMBO_TIMEOUT_MS
-    ) {
-      parsed.player.comboCount = 0;
-      parsed.player.comboMultiplier = 1.0;
-    }
-    return parsed;
+    return normalizeAppState(parsed);
   } catch {
-    return createInitialSeedState();
+    return null;
   }
 }
 
-export function saveAppState(state: AppState): void {
+/**
+ * Removes legacy localStorage data once migrated or dismissed so state lives exclusively in the database.
+ */
+export function clearLegacyLocalState(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.removeItem(STORAGE_KEY);
   } catch {
-    // Ignore storage quota errors safely
+    // Ignore storage access errors safely
   }
 }

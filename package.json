@@ -5,22 +5,29 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.functions.json --noEmit",
+    "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && npx -y netlify-cli deploy --prod --dir=dist"
+    "deploy": "npx -y netlify-cli deploy --build --prod"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.1",
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.1.0",
     "canvas-confetti": "^1.9.3",
     "lucide-react": "^0.460.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@netlify/functions": "^6.1.2",
     "@types/canvas-confetti": "^1.9.0",
+    "@types/node": "^26.6.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "autoprefixer": "^10.4.20",
+    "dotenv": "^18.0.10",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "~5.6.2",

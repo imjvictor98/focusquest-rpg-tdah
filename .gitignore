@@ -5,3 +5,16 @@ dist-ssr
 .netlify
 .DS_Store
 tsconfig.tsbuildinfo
+
+# Environment & secrets (NEVER commit!)
+.env
+.env.*
+!.env.example
+
+# Keys, certificates & local databases
+*.pem
+*.key
+*.crt
+*.sqlite
+*.sqlite3
+*.db

@@ -11,11 +11,21 @@ import {
   Shield,
   Zap,
   HelpCircle,
+  Fingerprint,
+  Cloud,
+  CloudOff,
+  Loader2,
+  LogOut,
 } from 'lucide-react';
-import { PlayerState } from '../types';
+import { AuthUser, PlayerState, SyncStatus } from '../types';
 
 interface PlayerHeaderProps {
   player: PlayerState;
+  user: AuthUser;
+  syncStatus: SyncStatus;
+  onRetrySync: () => void;
+  onOpenSecurityModal: () => void;
+  onLogout: () => void;
   onToggleSound: () => void;
   onExportJson: () => void;
   onImportJson: (file: File) => void;
@@ -25,6 +35,11 @@ interface PlayerHeaderProps {
 
 export const PlayerHeader: React.FC<PlayerHeaderProps> = ({
   player,
+  user,
+  syncStatus,
+  onRetrySync,
+  onOpenSecurityModal,
+  onLogout,
   onToggleSound,
   onExportJson,
   onImportJson,
@@ -73,13 +88,47 @@ export const PlayerHeader: React.FC<PlayerHeaderProps> = ({
             </div>
 
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-lg sm:text-xl font-extrabold tracking-tight text-white flex items-center gap-2">
-                  FocusQuest <span className="text-xs font-mono uppercase px-2 py-0.5 rounded-md bg-violet-500/20 text-violet-300 border border-violet-500/30">RPG</span>
+                  FocusQuest{' '}
+                  <span className="text-xs font-mono uppercase px-2 py-0.5 rounded-md bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                    RPG
+                  </span>
                 </h1>
+                {syncStatus === 'saving' && (
+                  <span
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30"
+                    title="Salvando progresso no banco Neon PostgreSQL"
+                  >
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Salvando...
+                  </span>
+                )}
+                {syncStatus === 'synced' && (
+                  <span
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    title="Seu progresso está salvo com segurança na nuvem"
+                  >
+                    <Cloud className="w-3 h-3" />
+                    Nuvem
+                  </span>
+                )}
+                {syncStatus === 'error' && (
+                  <button
+                    type="button"
+                    onClick={onRetrySync}
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition-colors"
+                    title="Falha ao salvar no banco — clique para tentar novamente"
+                  >
+                    <CloudOff className="w-3 h-3" />
+                    Reenviar
+                  </button>
+                )}
               </div>
-              <p className="text-xs sm:text-sm text-slate-400 font-medium flex items-center gap-1.5">
+              <p className="text-xs sm:text-sm text-slate-400 font-medium flex flex-wrap items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5 text-violet-400" />
+                <span className="text-slate-200 font-semibold">{user.displayName}</span>
+                <span className="text-slate-600">•</span>
                 <span>{getHeroTitle(player.level)}</span>
                 <span className="text-slate-600">•</span>
                 <span className="text-slate-400">{player.totalQuestsCompleted} missões vencidas</span>
@@ -167,8 +216,27 @@ export const PlayerHeader: React.FC<PlayerHeaderProps> = ({
             </div>
           </div>
 
-          {/* Quick Utility Buttons (Tutorial, Audio + Backup JSON) */}
-          <div className="flex items-center gap-1.5">
+          {/* Quick Utility Buttons (Passkeys/Conta, Tutorial, Audio + Backup JSON + Logout) */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              onClick={onOpenSecurityModal}
+              className={`relative px-3 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95 ${
+                user.passkeysCount > 0
+                  ? 'bg-emerald-500/10 hover:bg-emerald-500/20 border-emerald-500/35 text-emerald-300 hover:text-white'
+                  : 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/40 text-amber-200 hover:text-white'
+              }`}
+              title="Gerenciar Passkeys, senha de recuperação e perfil"
+              aria-label="Configurar Passkeys e Conta"
+            >
+              <Fingerprint className="w-4 h-4" />
+              <span className="hidden sm:inline">
+                {user.passkeysCount > 0 ? `Passkeys (${user.passkeysCount})` : 'Configurar Passkey'}
+              </span>
+              {user.passkeysCount === 0 && (
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              )}
+            </button>
+
             <button
               onClick={onStartOnboarding}
               className="px-3 py-2.5 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/40 text-violet-300 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95"
@@ -230,6 +298,15 @@ export const PlayerHeader: React.FC<PlayerHeaderProps> = ({
               aria-label="Restaurar estado inicial"
             >
               <RotateCcw className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={onLogout}
+              className="p-2.5 rounded-xl bg-[#0B0F19] border border-[#1E293B] text-slate-400 hover:text-rose-400 hover:border-rose-500/40 transition-colors"
+              title="Sair da conta"
+              aria-label="Sair da conta"
+            >
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </div>

@@ -1,25 +1,28 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   AppState,
+  AuthUser,
   BrainDumpItem,
   Difficulty,
   FloatingFeedback,
   RewardItem,
+  SyncStatus,
   ToastNotification,
 } from './types';
 import {
   applyPlayerRewards,
   BOSS_VICTORY_BONUS_COINS,
   BOSS_VICTORY_BONUS_XP,
+  clearLegacyLocalState,
   COMBO_TIMEOUT_MS,
   createInitialSeedState,
   createOnboardingBossQuest,
-  loadAppState,
+  normalizeAppState,
   ONBOARDING_BONUS_COINS,
   ONBOARDING_BONUS_XP,
   ONBOARDING_QUEST_ID,
+  readLegacyLocalState,
   REWARD_TABLE,
-  saveAppState,
   SUBTASK_BASE_COINS,
   SUBTASK_BASE_XP,
 } from './utils/gameRules';
@@ -29,6 +32,13 @@ import {
   triggerLevelUpConfetti,
   triggerSmallBurst,
 } from './utils/confettiFx';
+import {
+  ApiError,
+  fetchCurrentUser,
+  loadCloudGameState,
+  logoutAccount,
+  saveCloudGameState,
+} from './services/api';
 import { PlayerHeader } from './components/PlayerHeader';
 import { QuestBoard } from './components/QuestBoard';
 import { BrainDumpPanel } from './components/BrainDumpPanel';
@@ -36,27 +46,211 @@ import { RewardShopPanel } from './components/RewardShopPanel';
 import { TunnelModeOverlay } from './components/TunnelModeOverlay';
 import { FeedbackLayer } from './components/FeedbackLayer';
 import { OnboardingTour } from './components/OnboardingTour';
-import { Sword, Brain, ShoppingBag } from 'lucide-react';
+import { AuthPage } from './components/AuthPage';
+import { AccountSecurityModal } from './components/AccountSecurityModal';
+import { LocalMigrationBanner } from './components/LocalMigrationBanner';
+import { Sword, Brain, ShoppingBag, Fingerprint, Loader2, X } from 'lucide-react';
 
 export function App() {
-  const [state, setState] = useState<AppState>(() => loadAppState());
+  // Authentication & Cloud State lifecycle
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [stateLoading, setStateLoading] = useState<boolean>(false);
+  const [stateLoadedForUserId, setStateLoadedForUserId] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
+
+  // Legacy localStorage migration state (read-only check, cleared after migration/dismiss)
+  const [legacyLocalState, setLegacyLocalState] = useState<AppState | null>(() =>
+    readLegacyLocalState()
+  );
+  const [migratingLegacy, setMigratingLegacy] = useState<boolean>(false);
+
+  // Account & Passkey configuration modal
+  const [isSecurityModalOpen, setIsSecurityModalOpen] = useState<boolean>(false);
+  const [dismissedPasskeyPrompt, setDismissedPasskeyPrompt] = useState<boolean>(false);
+
+  // Game State (stored in Neon PostgreSQL, never written to localStorage)
+  const [state, setState] = useState<AppState>(() => createInitialSeedState());
   const [floatingItems, setFloatingItems] = useState<FloatingFeedback[]>([]);
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const [levelUpModal, setLevelUpModal] = useState<{ level: number } | null>(null);
   const [mobileSection, setMobileSection] = useState<'quests' | 'brain' | 'shop'>('quests');
-  const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(
-    () => !loadAppState().hasCompletedOnboarding
-  );
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(false);
   const [onboardingStep, setOnboardingStep] = useState<number>(0);
   const [onboardingActionDone, setOnboardingActionDone] = useState<boolean>(false);
 
-  // Persist state on every update
+  // Refs for debounced cloud persistence & flushing
+  const isHydratingRef = useRef<boolean>(false);
+  const hasDirtyStateRef = useRef<boolean>(false);
+  const latestStateRef = useRef<AppState>(state);
+  const saveTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
-    saveAppState(state);
+    latestStateRef.current = state;
   }, [state]);
+
+  const pushToast = useCallback(
+    (title: string, subtitle: string, type: ToastNotification['type'] = 'info') => {
+      const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      setToasts((prev) => [...prev, { id, title, subtitle, type }]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 4500);
+    },
+    []
+  );
+
+  // Check active session on mount
+  useEffect(() => {
+    let active = true;
+    fetchCurrentUser()
+      .then((user) => {
+        if (!active) return;
+        setAuthUser(user);
+      })
+      .catch(() => {
+        if (!active) return;
+        setAuthUser(null);
+      })
+      .finally(() => {
+        if (active) setAuthChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Load user's cloud game state from PostgreSQL after authentication
+  useEffect(() => {
+    if (!authUser) {
+      setStateLoadedForUserId(null);
+      setIsOnboardingOpen(false);
+      return;
+    }
+
+    if (stateLoadedForUserId === authUser.id) return;
+
+    let active = true;
+    setStateLoading(true);
+    isHydratingRef.current = true;
+    hasDirtyStateRef.current = false;
+
+    loadCloudGameState()
+      .then(({ state: cloudState }) => {
+        if (!active) return;
+        const normalized = normalizeAppState(cloudState);
+        setState(normalized);
+        latestStateRef.current = normalized;
+        setIsOnboardingOpen(!normalized.hasCompletedOnboarding);
+        setStateLoadedForUserId(authUser.id);
+        setSyncStatus('synced');
+        setLegacyLocalState(readLegacyLocalState());
+      })
+      .catch((err) => {
+        if (!active) return;
+        if (err instanceof ApiError && err.status === 401) {
+          setAuthUser(null);
+          return;
+        }
+        setSyncStatus('error');
+        pushToast(
+          'Erro ao carregar dados',
+          'Não foi possível sincronizar seu progresso do banco de dados.',
+          'info'
+        );
+      })
+      .finally(() => {
+        if (active) {
+          setStateLoading(false);
+          // Allow persistence effect to observe subsequent user edits
+          setTimeout(() => {
+            isHydratingRef.current = false;
+          }, 0);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authUser, stateLoadedForUserId, pushToast]);
+
+  const flushCloudSave = useCallback(
+    async (keepalive = false) => {
+      if (!authUser || stateLoadedForUserId !== authUser.id) return;
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+
+      hasDirtyStateRef.current = false;
+      setSyncStatus('saving');
+      try {
+        await saveCloudGameState(latestStateRef.current, keepalive);
+        setSyncStatus('synced');
+      } catch (err) {
+        hasDirtyStateRef.current = true;
+        if (err instanceof ApiError && err.status === 401) {
+          setAuthUser(null);
+          return;
+        }
+        setSyncStatus('error');
+      }
+    },
+    [authUser, stateLoadedForUserId]
+  );
+
+  // Debounced auto-save to Neon PostgreSQL whenever game state changes
+  useEffect(() => {
+    if (!authUser || stateLoadedForUserId !== authUser.id || isHydratingRef.current) {
+      return;
+    }
+
+    hasDirtyStateRef.current = true;
+    setSyncStatus('saving');
+
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      flushCloudSave(false);
+    }, 450);
+
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [state, authUser, stateLoadedForUserId, flushCloudSave]);
+
+  // Flush pending changes when tab hides or page closes
+  useEffect(() => {
+    const handleFlush = () => {
+      if (hasDirtyStateRef.current && authUser && stateLoadedForUserId === authUser.id) {
+        void saveCloudGameState(latestStateRef.current, true);
+        hasDirtyStateRef.current = false;
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        handleFlush();
+      }
+    };
+
+    window.addEventListener('pagehide', handleFlush);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', handleFlush);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [authUser, stateLoadedForUserId]);
 
   // Silent combo expiration check (Zero punishment)
   useEffect(() => {
+    if (!authUser) return;
     const timer = setInterval(() => {
       setState((prev) => {
         if (
@@ -77,7 +271,7 @@ export function App() {
       });
     }, 15000);
     return () => clearInterval(timer);
-  }, []);
+  }, [authUser]);
 
   // ESC key exits Tunnel Mode
   useEffect(() => {
@@ -108,16 +302,73 @@ export function App() {
     []
   );
 
-  const pushToast = useCallback(
-    (title: string, subtitle: string, type: ToastNotification['type'] = 'info') => {
-      const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      setToasts((prev) => [...prev, { id, title, subtitle, type }]);
+  // Auth Handlers
+  const handleAuthenticated = (user: AuthUser, justRegisteredWithPassword = false) => {
+    setAuthUser(user);
+    setDismissedPasskeyPrompt(false);
+    if (justRegisteredWithPassword && user.passkeysCount === 0) {
+      setIsSecurityModalOpen(true);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (hasDirtyStateRef.current) {
+      await flushCloudSave(false);
+    }
+    try {
+      await logoutAccount();
+    } catch {
+      // Clear local session UI regardless
+    }
+    setIsSecurityModalOpen(false);
+    setAuthUser(null);
+    setStateLoadedForUserId(null);
+    setState(createInitialSeedState());
+  };
+
+  // Legacy localStorage migration handlers
+  const handleImportLegacyLocal = async () => {
+    if (!legacyLocalState) return;
+    setMigratingLegacy(true);
+    try {
+      const normalized = normalizeAppState(legacyLocalState);
+      await saveCloudGameState(normalized);
+      isHydratingRef.current = true;
+      setState(normalized);
+      latestStateRef.current = normalized;
+      setIsOnboardingOpen(!normalized.hasCompletedOnboarding);
+      clearLegacyLocalState();
+      setLegacyLocalState(null);
+      setSyncStatus('synced');
+      pushToast(
+        '☁️ Progresso Migrado para o Banco!',
+        'Seus dados foram salvos na nuvem e o localStorage antigo foi limpo.',
+        'reward'
+      );
       setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, 4500);
-    },
-    []
-  );
+        isHydratingRef.current = false;
+      }, 0);
+    } catch {
+      setSyncStatus('error');
+      pushToast(
+        'Falha na migração',
+        'Não foi possível salvar os dados migrados agora. Tente novamente.',
+        'info'
+      );
+    } finally {
+      setMigratingLegacy(false);
+    }
+  };
+
+  const handleDiscardLegacyLocal = () => {
+    clearLegacyLocalState();
+    setLegacyLocalState(null);
+    pushToast(
+      '🧹 Armazenamento Local Limpo',
+      'O localStorage antigo foi removido. Agora tudo fica salvo no banco de dados.',
+      'info'
+    );
+  };
 
   // Add new Quest
   const handleAddQuest = (title: string, difficulty: Difficulty, subtaskTitles: string[]) => {
@@ -161,7 +412,6 @@ export function App() {
       true
     );
 
-    // Visual & Audio feedback
     const normX = (event.clientX || window.innerWidth / 2) / window.innerWidth;
     const normY = (event.clientY || window.innerHeight / 2) / window.innerHeight;
     triggerSmallBurst(normX, normY);
@@ -475,8 +725,12 @@ export function App() {
       try {
         const parsed = JSON.parse(String(reader.result)) as AppState;
         if (parsed && parsed.player && Array.isArray(parsed.quests)) {
-          setState(parsed);
-          pushToast('✅ Progresso Restaurado!', 'Seu backup JSON foi carregado com sucesso.', 'info');
+          setState(normalizeAppState(parsed));
+          pushToast(
+            '✅ Progresso Restaurado!',
+            'Seu backup JSON foi carregado e sincronizado na nuvem.',
+            'info'
+          );
         }
       } catch {
         pushToast('Formato inválido', 'Escolha um arquivo JSON válido do FocusQuest.', 'info');
@@ -597,7 +851,6 @@ export function App() {
       return;
     }
 
-    // Fallback simulated dopamine hit if board is completely empty
     const normX = (event.clientX || window.innerWidth / 2) / window.innerWidth;
     const normY = (event.clientY || window.innerHeight / 2) / window.innerHeight;
     triggerSmallBurst(normX, normY);
@@ -614,6 +867,33 @@ export function App() {
       handleEnterTunnel(targetQuest.id);
     }
   };
+
+  // Loading Splash Screen (Auth or Cloud State Hydration)
+  if (authChecking || (authUser && stateLoading)) {
+    return (
+      <div className="min-h-screen bg-[#0B0F19] text-slate-100 flex flex-col items-center justify-center p-6">
+        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-[#8B5CF6] to-[#6366F1] p-0.5 shadow-xl shadow-violet-500/25 mb-4">
+          <div className="w-full h-full rounded-[14px] bg-[#0B0F19] flex items-center justify-center">
+            <Loader2 className="w-7 h-7 text-violet-400 animate-spin" />
+          </div>
+        </div>
+        <p className="text-sm font-bold text-white">
+          {authChecking ? 'Verificando sua sessão...' : 'Carregando seu progresso da nuvem...'}
+        </p>
+        <p className="text-xs text-slate-400 mt-1">FocusQuest RPG</p>
+      </div>
+    );
+  }
+
+  // Unauthenticated -> Login / Sign Up Page with Passkeys
+  if (!authUser) {
+    return (
+      <AuthPage
+        onAuthenticated={handleAuthenticated}
+        hasLegacyLocalData={Boolean(legacyLocalState)}
+      />
+    );
+  }
 
   // Active Tunnel Quest Resolution
   const activeTunnelQuest = state.activeTunnelTask
@@ -638,12 +918,59 @@ export function App() {
         {/* Top Player Stats & Controls Header */}
         <PlayerHeader
           player={state.player}
+          user={authUser}
+          syncStatus={syncStatus}
+          onRetrySync={() => flushCloudSave(false)}
+          onOpenSecurityModal={() => setIsSecurityModalOpen(true)}
+          onLogout={handleLogout}
           onToggleSound={handleToggleSound}
           onExportJson={handleExportJson}
           onImportJson={handleImportJson}
           onResetSeed={handleResetSeed}
           onStartOnboarding={handleStartOnboarding}
         />
+
+        {/* One-time Legacy localStorage Migration Banner */}
+        {legacyLocalState && (
+          <LocalMigrationBanner
+            legacyState={legacyLocalState}
+            importing={migratingLegacy}
+            onImport={handleImportLegacyLocal}
+            onDiscard={handleDiscardLegacyLocal}
+          />
+        )}
+
+        {/* Gentle Passkey Setup Banner if user signed up with password and has 0 passkeys */}
+        {authUser.passkeysCount === 0 && !dismissedPasskeyPrompt && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-amber-500/20 text-amber-300 flex-shrink-0">
+                <Fingerprint className="w-5 h-5" />
+              </div>
+              <p className="text-xs sm:text-sm text-amber-100">
+                <strong className="text-amber-300">Configure sua Passkey!</strong> Entre com
+                digital, Face ID ou PIN em 1 clique sem precisar digitar senha.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 self-end sm:self-center">
+              <button
+                type="button"
+                onClick={() => setIsSecurityModalOpen(true)}
+                className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors"
+              >
+                Configurar agora
+              </button>
+              <button
+                type="button"
+                onClick={() => setDismissedPasskeyPrompt(true)}
+                className="p-1.5 rounded-lg text-amber-300/70 hover:text-amber-200"
+                aria-label="Dispensar aviso"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Mobile Quick Access Switcher */}
         <div className="grid grid-cols-3 gap-2 lg:hidden bg-[#131A2A] p-1.5 rounded-2xl border border-[#1E293B]">
@@ -729,9 +1056,19 @@ export function App() {
         </main>
       </div>
 
-      {/* Interactive Gamified Onboarding Tour (Hidden while inside fullscreen Tunnel Mode) */}
+      {/* Account & Passkeys Configuration Modal */}
+      <AccountSecurityModal
+        isOpen={isSecurityModalOpen}
+        user={authUser}
+        onClose={() => setIsSecurityModalOpen(false)}
+        onUserUpdated={setAuthUser}
+        onLogout={handleLogout}
+        onNotify={pushToast}
+      />
+
+      {/* Interactive Gamified Onboarding Tour (Hidden while inside fullscreen Tunnel Mode or Security Modal) */}
       <OnboardingTour
-        isOpen={isOnboardingOpen && !activeTunnelQuest}
+        isOpen={isOnboardingOpen && !activeTunnelQuest && !isSecurityModalOpen}
         stepIndex={onboardingStep}
         interactiveActionDone={onboardingActionDone}
         hasBossQuest={hasActiveBoss}
