@@ -73,3 +73,24 @@ export interface ToastNotification {
   subtitle?: string;
   type: 'reward' | 'boss' | 'combo' | 'info';
 }
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  displayName: string;
+  hasPassword: boolean;
+  passkeysCount: number;
+  createdAt: string;
+}
+
+export interface PasskeyInfo {
+  id: string;
+  name: string;
+  deviceType: 'singleDevice' | 'multiDevice' | string;
+  backedUp: boolean;
+  transports: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export type SyncStatus = 'synced' | 'saving' | 'error';
